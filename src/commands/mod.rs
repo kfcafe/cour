@@ -45,6 +45,7 @@ pub enum Commands {
     },
     Doctor,
     Tui,
+    Setup,
 }
 
 pub async fn dispatch(cli: Cli) -> AppResult<()> {
@@ -118,6 +119,7 @@ pub async fn dispatch(cli: Cli) -> AppResult<()> {
             Ok(())
         }
         Some(Commands::Tui) => tui(config_path),
+        Some(Commands::Setup) => setup(config_path),
         None => tui(config_path),
     }
 }
@@ -137,7 +139,16 @@ pub fn tui(config_path: Option<&std::path::Path>) -> AppResult<()> {
         }
         Err(e) => {
             let paths = crate::config::ProjectPaths::detect().ok();
-            let config_file = paths.map(|p| p.config_file);
+            let config_file = config_path
+                .map(std::path::Path::to_path_buf)
+                .or_else(|| paths.as_ref().map(|p| p.config_file.clone()));
+
+            if let Some(ref path) = config_file {
+                if crate::ui::onboarding::run_onboarding(path).is_ok() {
+                    return Ok(());
+                }
+            }
+
             eprintln!("cour — local-first AI mail client\n");
             eprintln!("No configuration found.\n");
             if let Some(ref path) = config_file {
@@ -157,18 +168,32 @@ pub fn tui(config_path: Option<&std::path::Path>) -> AppResult<()> {
     }
 }
 
+pub fn setup(config_path: Option<&std::path::Path>) -> AppResult<()> {
+    let config_file = config_path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or(crate::config::ProjectPaths::detect()?.config_file);
+    crate::ui::onboarding::run_onboarding(&config_file)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use clap::CommandFactory;
 
-    use super::{Cli, Commands};
+    use crate::config::ConfigArgs;
+    use crate::test_support::TestEnvGuard;
+
+    use super::{dispatch, Cli, Commands};
 
     #[test]
     fn help_lists_planned_subcommands() {
         let help = Cli::command().render_long_help().to_string();
         for expected in [
             "sync", "reindex", "brief", "ask", "thread", "draft", "approve", "send", "doctor",
-            "tui",
+            "tui", "setup",
         ] {
             assert!(
                 help.contains(expected),
@@ -181,5 +206,59 @@ mod tests {
     fn enum_contains_brief_variant() {
         let variant = Commands::Brief;
         assert!(matches!(variant, Commands::Brief));
+    }
+
+    #[tokio::test]
+    async fn default_launch_path_invokes_tui_when_config_exists() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("cour-tui-startup-{unique}"));
+        fs::create_dir_all(&root).expect("create root");
+
+        let config_home = root.join("config-home");
+        let state_home = root.join("state-home");
+        let maildir_root = root.join("Maildir");
+        fs::create_dir_all(config_home.join(".config/cour")).expect("create config dir");
+        fs::create_dir_all(&state_home).expect("create state dir");
+        fs::create_dir_all(&maildir_root).expect("create maildir dir");
+
+        let config_path = config_home.join(".config/cour/config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "accounts = [{{ name = \"personal\", email_address = \"you@example.com\", maildir_root = \"{}\", default = true }}]\n",
+                maildir_root.display()
+            ),
+        )
+        .expect("write config");
+
+        let mut env = TestEnvGuard::acquire();
+        env.set_var("HOME", &config_home);
+        env.set_var("XDG_STATE_HOME", &state_home);
+
+        let cli = Cli {
+            config: ConfigArgs {
+                config: Some(PathBuf::from(&config_path)),
+            },
+            command: None,
+        };
+
+        let result = dispatch(cli).await;
+        assert!(result.is_err(), "expected tui startup to be attempted");
+
+        let error = result.expect_err("tui startup should fail in test env");
+        let message = error.to_string().to_lowercase();
+        assert!(
+            message.contains("tty")
+                || message.contains("terminal")
+                || message.contains("raw mode")
+                || message.contains("os error"),
+            "expected terminal startup failure, got: {message}"
+        );
+
+        drop(env);
+        let _ = fs::remove_dir_all(root);
     }
 }
