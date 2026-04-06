@@ -29,6 +29,10 @@ pub struct Theme {
     pub thread_waiting: Style,
     pub thread_low_value: Style,
     pub thread_selected: Style,
+    pub thread_subject: Style,
+    pub thread_meta: Style,
+    pub thread_tag: Style,
+    pub empty_state: Style,
     pub selection: Style,
 
     pub section_header: Style,
@@ -82,12 +86,17 @@ impl Default for Theme {
             thread_needs_reply: Style::default().fg(warning).add_modifier(Modifier::BOLD),
             thread_waiting: Style::default().fg(accent),
             thread_low_value: Style::default().fg(dim_color),
-            thread_selected: Style::default().bg(bg_selected).fg(text_color),
+            thread_selected: Style::default()
+                .bg(bg_selected)
+                .fg(text_color)
+                .add_modifier(Modifier::BOLD),
+            thread_subject: Style::default().fg(text_color).add_modifier(Modifier::BOLD),
+            thread_meta: Style::default().fg(muted_color),
+            thread_tag: Style::default().fg(muted_color),
+            empty_state: Style::default().fg(muted_color),
             selection: Style::default().bg(bg_selected).fg(text_color),
 
-            section_header: Style::default()
-                .fg(text_color)
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            section_header: Style::default().fg(text_color).add_modifier(Modifier::BOLD),
             count_badge: Style::default().fg(accent).add_modifier(Modifier::BOLD),
 
             warning: Style::default().fg(warning),

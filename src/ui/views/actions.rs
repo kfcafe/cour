@@ -1,6 +1,6 @@
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
     Frame,
@@ -74,14 +74,16 @@ pub fn render_actions(frame: &mut Frame, area: Rect, theme: &Theme, state: &Acti
         .constraints([
             Constraint::Percentage(42),
             Constraint::Percentage(42),
-            Constraint::Length(5),
+            Constraint::Length(6),
         ])
         .split(area);
 
     render_thread_section(
         frame,
         sections[0],
+        theme,
         "Needs Reply",
+        "Threads that still need your answer.",
         state.selected_section == 0,
         theme.thread_selected,
         &state.needs_reply,
@@ -90,25 +92,33 @@ pub fn render_actions(frame: &mut Frame, area: Rect, theme: &Theme, state: &Acti
     render_thread_section(
         frame,
         sections[1],
+        theme,
         "Waiting on Them",
+        "Threads already handed off to someone else.",
         state.selected_section == 1,
         theme.selection,
         &state.waiting_on_them,
         state.selected_row,
     );
 
-    let drafts_title = if state.selected_section == 2 {
-        " Pending Drafts * "
-    } else {
-        " Pending Drafts "
-    };
-    let drafts = Paragraph::new(format!("Pending Drafts: {}", state.pending_drafts))
+    let drafts_block = section_block(theme, "Pending Drafts", state.selected_section == 2);
+    let drafts_lines = vec![
+        Line::from(vec![
+            Span::styled("count  ", theme.text_dim),
+            Span::styled(state.pending_drafts.to_string(), theme.count_badge),
+        ]),
+        Line::from(vec![
+            Span::styled("safety ", theme.text_dim),
+            Span::styled("drafts stay local until you send from CLI", theme.warning),
+        ]),
+    ];
+    let drafts = Paragraph::new(drafts_lines)
         .style(if state.selected_section == 2 {
             theme.text
         } else {
-            theme.text_dim
+            theme.text_muted
         })
-        .block(Block::default().borders(Borders::ALL).title(drafts_title))
+        .block(drafts_block)
         .wrap(Wrap { trim: true });
     frame.render_widget(drafts, sections[2]);
 }
@@ -116,23 +126,24 @@ pub fn render_actions(frame: &mut Frame, area: Rect, theme: &Theme, state: &Acti
 fn render_thread_section(
     frame: &mut Frame,
     area: Rect,
+    theme: &Theme,
     title: &str,
+    subtitle: &str,
     active: bool,
     selected_style: Style,
     rows: &[ThreadListRow],
     selected_row: usize,
 ) {
-    let block = Block::default().borders(Borders::ALL).title(if active {
-        format!(" {title} * ")
-    } else {
-        format!(" {title} ")
-    });
+    let block = section_block(theme, title, active);
 
     if rows.is_empty() {
-        let empty = Paragraph::new("— none")
-            .style(Style::default())
-            .block(block)
-            .wrap(Wrap { trim: true });
+        let empty = Paragraph::new(vec![
+            Line::from(Span::styled(subtitle, theme.text_dim)),
+            Line::default(),
+            Line::from(Span::styled("— none", theme.empty_state)),
+        ])
+        .block(block)
+        .wrap(Wrap { trim: true });
         frame.render_widget(empty, area);
         return;
     }
@@ -146,7 +157,24 @@ fn render_thread_section(
             } else {
                 Style::default()
             };
-            ListItem::new(Line::from(vec![Span::raw(format_thread_row(row))])).style(style)
+            let lines = vec![
+                Line::from(vec![Span::styled(
+                    format_thread_subject(row),
+                    if active && index == selected_row {
+                        theme.thread_subject.add_modifier(Modifier::BOLD)
+                    } else {
+                        theme.thread_subject
+                    },
+                )]),
+                Line::from(vec![
+                    Span::styled(format!("  #{}", row.id), theme.text_dim),
+                    Span::raw("  "),
+                    Span::styled(format!("{} messages", row.message_count), theme.text_muted),
+                    Span::raw("  "),
+                    Span::styled(format_age(row.latest_message_at.as_deref()), theme.text_dim),
+                ]),
+            ];
+            ListItem::new(lines).style(style)
         })
         .collect::<Vec<_>>();
 
@@ -154,18 +182,54 @@ fn render_thread_section(
     frame.render_widget(list, area);
 }
 
-fn format_thread_row(row: &ThreadListRow) -> String {
-    format!(
-        "[{}] {}  ({} messages, {})",
-        row.id,
-        row.subject.as_deref().unwrap_or("(no subject)"),
-        row.message_count,
-        format_age(row.latest_message_at.as_deref())
-    )
+fn section_block(theme: &Theme, title: &str, active: bool) -> Block<'static> {
+    let title_style = if active {
+        theme.border_focused.add_modifier(Modifier::BOLD)
+    } else {
+        theme.border
+    };
+
+    Block::default()
+        .borders(Borders::ALL)
+        .border_style(if active {
+            theme.border_focused
+        } else {
+            theme.border
+        })
+        .title(Line::from(vec![
+            Span::styled(if active { "● " } else { "○ " }, title_style),
+            Span::styled(title.to_string(), title_style),
+        ]))
+}
+
+fn format_thread_subject(row: &ThreadListRow) -> String {
+    row.subject.as_deref().unwrap_or("(no subject)").to_string()
 }
 
 fn format_age(latest_message_at: Option<&str>) -> String {
     latest_message_at
         .map(|value| value.replace('T', " ").chars().take(16).collect())
         .unwrap_or_else(|| "unknown age".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn actions_selected_section_cycles_with_tab() {
+        let mut state = ActionsState::default();
+
+        state.move_section(1);
+        assert_eq!(state.selected_section, 1);
+
+        state.move_section(1);
+        assert_eq!(state.selected_section, 2);
+
+        state.move_section(1);
+        assert_eq!(state.selected_section, 0);
+
+        state.move_section(-1);
+        assert_eq!(state.selected_section, 2);
+    }
 }

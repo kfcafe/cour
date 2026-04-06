@@ -1,8 +1,9 @@
 use ratatui::{
+    buffer::Buffer,
     layout::{Constraint, Rect},
     style::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Widget, Wrap},
     Frame,
 };
 use rusqlite::Connection;
@@ -62,11 +63,25 @@ pub fn render_inbox(frame: &mut Frame, area: Rect, theme: &Theme, state: &InboxS
         ratatui::layout::Layout::horizontal([Constraint::Length(16), Constraint::Min(0)])
             .areas(area);
 
-    // filter rail
+    render_filter_rail(frame, filter_area, theme, &state.filter);
+
+    if state.threads.is_empty() {
+        let empty = Paragraph::new("No threads — run cour reindex")
+            .style(theme.empty_state)
+            .block(Block::default().borders(Borders::NONE))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(empty, list_area);
+        return;
+    }
+
+    render_thread_list(frame, list_area, theme, state);
+}
+
+fn render_filter_rail(frame: &mut Frame, area: Rect, theme: &Theme, filter: &Option<String>) {
     let filter_items: Vec<ListItem> = FILTERS
         .iter()
         .map(|(label, filter_val)| {
-            let active = match (&state.filter, filter_val) {
+            let active = match (filter, filter_val) {
                 (None, None) => true,
                 (Some(f), Some(v)) => f.as_str() == *v,
                 _ => false,
@@ -74,56 +89,84 @@ pub fn render_inbox(frame: &mut Frame, area: Rect, theme: &Theme, state: &InboxS
             let style = if active {
                 theme.workspace_active
             } else {
-                theme.text_muted
+                theme.workspace_inactive
             };
             ListItem::new(Line::from(Span::styled(format!(" {label}"), style)))
         })
         .collect();
-    let filter_list =
-        List::new(filter_items).block(Block::default().borders(Borders::RIGHT).title(" Filter "));
-    frame.render_widget(filter_list, filter_area);
+    let filter_list = List::new(filter_items).block(
+        Block::default()
+            .borders(Borders::RIGHT)
+            .border_style(theme.border)
+            .title(" Filter "),
+    );
+    frame.render_widget(filter_list, area);
+}
 
-    // thread list
-    if state.threads.is_empty() {
-        let empty = Paragraph::new("No threads — run cour reindex")
-            .style(theme.text_dim)
-            .block(Block::default().borders(Borders::NONE))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(empty, list_area);
-        return;
-    }
-
+fn render_thread_list<W>(target: &mut W, area: Rect, theme: &Theme, state: &InboxState)
+where
+    W: WidgetRef,
+{
     let items: Vec<ListItem> = state
         .threads
         .iter()
         .enumerate()
         .map(|(i, row)| {
-            let style = if i == state.selected {
+            let row_style = if i == state.selected {
                 theme.thread_selected
             } else {
-                Style::default()
+                theme.text
             };
-            let state_tag = row.state.as_deref().unwrap_or("?");
+            let tag_style = if i == state.selected {
+                theme
+                    .thread_selected
+                    .patch(thread_state_style(theme, row.state.as_deref()))
+            } else {
+                theme
+                    .thread_tag
+                    .patch(thread_state_style(theme, row.state.as_deref()))
+            };
+            let subject_style = if i == state.selected {
+                theme.thread_selected.patch(theme.thread_subject)
+            } else {
+                theme.thread_subject
+            };
+            let meta_style = if i == state.selected {
+                theme.thread_selected.patch(theme.thread_meta)
+            } else {
+                theme.thread_meta
+            };
+
+            let state_tag = format_state_tag(row.state.as_deref());
             let subject = row.subject.as_deref().unwrap_or("(no subject)");
             let count = if row.message_count > 1 {
-                format!(" ({})", row.message_count)
+                format!("{} msgs", row.message_count)
             } else {
-                String::new()
+                "1 msg".to_string()
             };
+
             ListItem::new(Line::from(vec![
-                Span::styled(
-                    format!(" {state_tag:<14} "),
-                    thread_state_style(theme, row.state.as_deref()),
-                ),
-                Span::styled(subject.to_string(), theme.text),
-                Span::styled(count, theme.text_dim),
+                Span::styled(format!(" {state_tag:<12} "), tag_style),
+                Span::styled(subject.to_string(), subject_style),
+                Span::styled(format!("  {count}"), meta_style),
             ]))
-            .style(style)
+            .style(row_style)
         })
         .collect();
 
     let list = List::new(items).block(Block::default().borders(Borders::NONE).title(" Inbox "));
-    frame.render_widget(list, list_area);
+    target.render_widget(list, area);
+}
+
+fn format_state_tag(state: Option<&str>) -> &'static str {
+    match state {
+        Some("waiting_on_me") => "Needs reply",
+        Some("waiting_on_them") => "Waiting",
+        Some("low_value") => "Low value",
+        Some("urgent") => "Urgent",
+        Some("follow_up_due") => "Follow-up",
+        _ => "Open",
+    }
 }
 
 fn thread_state_style(theme: &Theme, state: Option<&str>) -> Style {
@@ -132,5 +175,70 @@ fn thread_state_style(theme: &Theme, state: Option<&str>) -> Style {
         Some("waiting_on_them") => theme.thread_waiting,
         Some("low_value") => theme.thread_low_value,
         _ => theme.text_muted,
+    }
+}
+
+trait WidgetRef {
+    fn render_widget(&mut self, widget: List<'_>, area: Rect);
+}
+
+impl WidgetRef for Frame<'_> {
+    fn render_widget(&mut self, widget: List<'_>, area: Rect) {
+        Frame::render_widget(self, widget, area);
+    }
+}
+
+impl WidgetRef for Buffer {
+    fn render_widget(&mut self, widget: List<'_>, area: Rect) {
+        Widget::render(widget, area, self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inbox_selected_row_uses_selection_style() {
+        let theme = Theme::default();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 60, 3));
+        let state = InboxState {
+            threads: vec![ThreadListRow {
+                id: 42,
+                subject: Some("Follow up with ops".to_string()),
+                state: Some("waiting_on_me".to_string()),
+                message_count: 3,
+                latest_message_at: None,
+            }],
+            selected: 0,
+            filter: None,
+        };
+
+        render_thread_list(&mut buffer, Rect::new(0, 0, 60, 3), &theme, &state);
+
+        let selected_cell = buffer
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "F")
+            .expect("selected row content")
+            .style();
+        assert_eq!(selected_cell.bg, theme.thread_selected.bg);
+
+        let tag_cell = buffer
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "N")
+            .expect("state tag cell")
+            .style();
+        assert_eq!(tag_cell.bg, theme.thread_selected.bg);
+
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Needs reply"));
+        assert!(rendered.contains("Follow up with ops"));
+        assert!(rendered.contains("3 msgs"));
     }
 }

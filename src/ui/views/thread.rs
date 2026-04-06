@@ -24,11 +24,20 @@ impl ThreadViewState {
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_add(1);
+        let max_offset = self.max_scroll_offset();
+        self.scroll_offset = self.scroll_offset.saturating_add(1).min(max_offset);
     }
 
     pub fn scroll_up(&mut self) {
         self.scroll_offset = self.scroll_offset.saturating_sub(1);
+    }
+
+    fn max_scroll_offset(&self) -> usize {
+        self.detail
+            .as_ref()
+            .map(thread_content_height)
+            .unwrap_or_default()
+            .saturating_sub(1)
     }
 }
 
@@ -47,8 +56,30 @@ pub fn render_thread_view(frame: &mut Frame, area: Rect, theme: &Theme, state: &
     ])
     .areas(area);
 
-    render_messages(frame, messages_area, theme, detail, state.scroll_offset);
+    let viewport_height = messages_area.height as usize;
+    let max_visible_scroll = state
+        .max_scroll_offset()
+        .saturating_sub(viewport_height.saturating_sub(1));
+    let scroll_offset = state.scroll_offset.min(max_visible_scroll);
+
+    render_messages(frame, messages_area, theme, detail, scroll_offset);
     render_metadata(frame, meta_area, theme, detail);
+}
+
+fn thread_content_height(detail: &ThreadDetailRow) -> usize {
+    let header_height = 2;
+    let message_height: usize = detail
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            let separator_height = usize::from(i > 0);
+            let body_height = msg.body_text.lines().count().max(1);
+            separator_height + 4 + body_height + 1
+        })
+        .sum();
+
+    header_height + message_height
 }
 
 fn render_messages(
@@ -61,33 +92,43 @@ fn render_messages(
     let subject = detail.subject.as_deref().unwrap_or("(no subject)");
     let mut lines = vec![
         Line::from(Span::styled(format!("Thread: {subject}"), theme.title)),
+        Line::from(vec![
+            Span::styled("Messages ", theme.text_dim),
+            Span::styled(detail.messages.len().to_string(), theme.count_badge),
+        ]),
         Line::default(),
     ];
 
     for (i, msg) in detail.messages.iter().enumerate() {
         if i > 0 {
             lines.push(Line::from(Span::styled(
-                "────────────────────────────────────────",
+                "· · · · · · · · · · · · · · · · · · · · · · · ·",
                 theme.text_dim,
             )));
         }
         lines.push(Line::from(vec![
-            Span::styled("From: ", theme.text_dim),
             Span::styled(
                 msg.from_email.as_deref().unwrap_or("unknown").to_string(),
                 theme.text_accent,
             ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::styled("Date: ", theme.text_dim),
+            Span::styled("  •  ", theme.text_dim),
             Span::styled(
                 msg.sent_at.as_deref().unwrap_or("unknown").to_string(),
                 theme.text_muted,
             ),
         ]));
-        lines.push(Line::default());
-        for body_line in msg.body_text.lines() {
-            lines.push(Line::from(Span::styled(body_line.to_string(), theme.text)));
+        lines.push(Line::from(Span::styled("", theme.text_dim)));
+        for body_line in msg.body_text.lines().filter(|line| !line.trim().is_empty()) {
+            lines.push(Line::from(vec![
+                Span::styled("  ", theme.text_dim),
+                Span::styled(body_line.to_string(), theme.text),
+            ]));
+        }
+        if msg.body_text.lines().all(|line| line.trim().is_empty()) {
+            lines.push(Line::from(vec![
+                Span::styled("  ", theme.text_dim),
+                Span::styled("(empty message)", theme.text_dim),
+            ]));
         }
         lines.push(Line::default());
     }
@@ -113,12 +154,14 @@ fn render_metadata(frame: &mut Frame, area: Rect, theme: &Theme, detail: &Thread
         Line::from(Span::styled("Metadata", theme.section_header)),
         Line::default(),
         Line::from(vec![
-            Span::styled("State: ", theme.text_dim),
+            Span::styled("State", theme.text_dim),
+            Span::styled("  ", theme.text_dim),
             Span::styled(state.to_string(), theme.text_accent),
         ]),
         Line::from(vec![
-            Span::styled("Messages: ", theme.text_dim),
-            Span::raw(format!("{}", detail.messages.len())),
+            Span::styled("Messages", theme.text_dim),
+            Span::styled("  ", theme.text_dim),
+            Span::styled(detail.messages.len().to_string(), theme.count_badge),
         ]),
         Line::default(),
         Line::from(Span::styled("Participants", theme.text_muted)),
@@ -135,17 +178,83 @@ fn render_metadata(frame: &mut Frame, area: Rect, theme: &Theme, detail: &Thread
     lines.extend([
         Line::default(),
         Line::from(Span::styled("AI Summary", theme.text_muted)),
-        Line::from(Span::styled("  unavailable", theme.text_dim)),
+        Line::from(Span::styled("  Coming soon", theme.text_dim)),
         Line::default(),
         Line::from(Span::styled("Latest Ask", theme.text_muted)),
-        Line::from(Span::styled("  unavailable", theme.text_dim)),
+        Line::from(Span::styled("  Coming soon", theme.text_dim)),
         Line::default(),
         Line::from(Span::styled("Related Threads", theme.text_muted)),
-        Line::from(Span::styled("  unavailable", theme.text_dim)),
+        Line::from(Span::styled("  Coming soon", theme.text_dim)),
     ]);
 
     let para = Paragraph::new(lines)
         .block(Block::default().borders(Borders::NONE))
         .wrap(Wrap { trim: false });
     frame.render_widget(para, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    use super::*;
+    use crate::index::query::{ThreadDetailRow, ThreadMessageRow};
+
+    #[test]
+    fn thread_view_shows_metadata_panel_and_messages() {
+        let backend = TestBackend::new(100, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        let state = ThreadViewState {
+            thread_id: Some(7),
+            detail: Some(ThreadDetailRow {
+                thread_id: 7,
+                state: Some("needs_reply".to_string()),
+                subject: Some("Quarterly planning".to_string()),
+                messages: vec![
+                    ThreadMessageRow {
+                        message_id: 1,
+                        subject: Some("Quarterly planning".to_string()),
+                        from_email: Some("alice@example.com".to_string()),
+                        body_text: "First update from Alice.".to_string(),
+                        sent_at: Some("2026-04-01".to_string()),
+                    },
+                    ThreadMessageRow {
+                        message_id: 2,
+                        subject: Some("Re: Quarterly planning".to_string()),
+                        from_email: Some("bob@example.com".to_string()),
+                        body_text: "Second reply from Bob.".to_string(),
+                        sent_at: Some("2026-04-02".to_string()),
+                    },
+                ],
+            }),
+            scroll_offset: 0,
+        };
+
+        terminal
+            .draw(|frame| render_thread_view(frame, frame.area(), &theme, &state))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        assert_contains(&buffer, "Thread: Quarterly planning");
+        assert_contains(&buffer, "alice@example.com");
+        assert_contains(&buffer, "Second reply from Bob.");
+        assert_contains(&buffer, "Metadata");
+        assert_contains(&buffer, "needs_reply");
+        assert_contains(&buffer, "Participants");
+        assert_contains(&buffer, "bob@example.com");
+        assert_contains(&buffer, "Coming soon");
+    }
+
+    fn assert_contains(buffer: &Buffer, needle: &str) {
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            rendered.contains(needle),
+            "expected buffer to contain {needle:?}, got: {rendered:?}"
+        );
+    }
 }

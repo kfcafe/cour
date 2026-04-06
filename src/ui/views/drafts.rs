@@ -68,39 +68,45 @@ pub fn render_drafts(frame: &mut Frame, area: Rect, theme: &Theme, state: &Draft
         .iter()
         .enumerate()
         .map(|(index, draft)| {
+            let selected = index == state.selected;
             let status_style = draft_status_style(theme, draft.approval_status.as_str());
             let subject = draft
                 .thread_id
                 .map(|thread_id| format!("thread #{thread_id}"))
                 .unwrap_or_else(|| "standalone draft".to_string());
-            let provider_model = match (draft.provider.as_deref(), draft.model.as_deref()) {
-                (Some(provider), Some(model)) => format!("{provider}/{model}"),
-                (Some(provider), None) => provider.to_string(),
-                (None, Some(model)) => model.to_string(),
-                (None, None) => draft.source.clone(),
-            };
-            let created_at = compact_timestamp(&draft.created_at);
-            let line = Line::from(vec![
-                Span::styled(format!("[{}] ", draft.id), theme.text_dim),
-                Span::styled(
-                    format!("{:<8}", draft.approval_status),
-                    status_style.add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(subject, theme.text),
-                Span::raw("  "),
-                Span::styled(provider_model, theme.text_dim),
-                Span::raw("  "),
-                Span::styled(created_at, theme.text_dim),
-            ]);
+            let provider_model = provider_model_label(draft);
+            let updated_at = compact_timestamp(&draft.updated_at);
+            let next_step = draft_next_step(draft);
 
-            let style = if index == state.selected {
+            let style = if selected {
                 theme.selection
             } else {
                 Style::default()
             };
+            let body = vec![
+                Line::from(vec![
+                    Span::styled(format!("[{}] ", draft.id), theme.text_dim),
+                    Span::styled(
+                        format!("{:<8}", draft.approval_status),
+                        status_style.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw("  "),
+                    Span::styled(subject, theme.thread_subject),
+                ]),
+                Line::from(vec![
+                    Span::styled("  model ", theme.text_dim),
+                    Span::styled(provider_model, theme.text_muted),
+                    Span::raw("  "),
+                    Span::styled("updated ", theme.text_dim),
+                    Span::styled(updated_at, theme.text_muted),
+                ]),
+                Line::from(vec![
+                    Span::styled("  next ", theme.text_dim),
+                    Span::styled(next_step, draft_next_step_style(theme, draft)),
+                ]),
+            ];
 
-            ListItem::new(line).style(style)
+            ListItem::new(body).style(style)
         })
         .collect::<Vec<_>>();
 
@@ -116,17 +122,32 @@ pub fn render_drafts(frame: &mut Frame, area: Rect, theme: &Theme, state: &Draft
 }
 
 fn build_preview_text(draft: &DraftReviewRow, theme: &Theme) -> Text<'static> {
-    let mut lines = vec![
+    let provider = draft.provider.as_deref().unwrap_or("-");
+    let model = draft.model.as_deref().unwrap_or("-");
+    let latest_event = draft
+        .latest_send_audit_at
+        .as_deref()
+        .or(draft.latest_approval_audit_at.as_deref())
+        .or(draft.latest_audit_at.as_deref())
+        .unwrap_or("-");
+
+    let lines = vec![
         Line::from(vec![
-            Span::styled("status: ", theme.text_dim),
+            Span::styled("status  ", theme.text_dim),
             Span::styled(
                 draft.approval_status.clone(),
                 draft_status_style(theme, draft.approval_status.as_str())
                     .add_modifier(Modifier::BOLD),
             ),
+            Span::raw("  "),
+            Span::styled("next  ", theme.text_dim),
+            Span::styled(draft_next_step(draft), draft_next_step_style(theme, draft)),
         ]),
         Line::from(vec![
-            Span::styled("thread: ", theme.text_dim),
+            Span::styled("source  ", theme.text_dim),
+            Span::raw(draft.source.clone()),
+            Span::raw("  "),
+            Span::styled("thread  ", theme.text_dim),
             Span::raw(
                 draft
                     .thread_id
@@ -134,34 +155,155 @@ fn build_preview_text(draft: &DraftReviewRow, theme: &Theme) -> Text<'static> {
                     .unwrap_or_else(|| "-".to_string()),
             ),
         ]),
-        Line::from(vec![Span::styled("to: ", theme.text_dim), Span::raw("-")]),
         Line::from(vec![
-            Span::styled("provider: ", theme.text_dim),
-            Span::raw(draft.provider.clone().unwrap_or_else(|| "-".to_string())),
+            Span::styled("provider  ", theme.text_dim),
+            Span::styled(provider.to_string(), theme.text_accent),
+            Span::raw("  "),
+            Span::styled("model  ", theme.text_dim),
+            Span::raw(model.to_string()),
         ]),
         Line::from(vec![
-            Span::styled("model: ", theme.text_dim),
-            Span::raw(draft.model.clone().unwrap_or_else(|| "-".to_string())),
+            Span::styled("created  ", theme.text_dim),
+            Span::raw(compact_timestamp(&draft.created_at)),
+            Span::raw("  "),
+            Span::styled("updated  ", theme.text_dim),
+            Span::raw(compact_timestamp(&draft.updated_at)),
         ]),
         Line::from(vec![
-            Span::styled("rationale: ", theme.text_dim),
-            Span::raw(if draft.has_rationale { "yes" } else { "no" }),
+            Span::styled("approved ", theme.text_dim),
+            Span::raw(compact_optional_timestamp(draft.approved_at.as_deref())),
+            Span::raw("  "),
+            Span::styled("sent  ", theme.text_dim),
+            Span::raw(compact_optional_timestamp(draft.sent_at.as_deref())),
+        ]),
+        Line::from(vec![
+            Span::styled("rationale ", theme.text_dim),
+            Span::raw(if draft.has_rationale {
+                "present"
+            } else {
+                "missing"
+            }),
+            Span::raw("  "),
+            Span::styled("latest audit  ", theme.text_dim),
+            Span::raw(compact_optional_timestamp(Some(latest_event))),
         ]),
         Line::default(),
-        Line::from(Span::styled("Body", theme.text)),
-        Line::from(Span::styled("────", theme.text_dim)),
+        Line::from(Span::styled("Safety", theme.title)),
+        Line::from(Span::styled(
+            "Nothing sends from the TUI. Review in CLI before approving or sending.",
+            theme.warning,
+        )),
+        Line::default(),
+        Line::from(Span::styled("Body", theme.title)),
+        Line::from(Span::styled(
+            "Draft body is intentionally hidden here to keep review metadata-first.",
+            theme.text_dim,
+        )),
     ];
 
-    let body = "Draft body unavailable".to_string();
-    lines.extend(body.lines().map(|line| Line::from(line.to_string())));
     Text::from(lines)
 }
 
 fn draft_status_style(theme: &Theme, status: &str) -> Style {
-    let _ = status;
-    theme.text_dim
+    match status {
+        "approved" => theme.text_success,
+        "sent" => theme.text_muted,
+        "pending" => theme.text_warning,
+        _ => theme.text_dim,
+    }
+}
+
+fn draft_next_step(draft: &DraftReviewRow) -> &'static str {
+    match draft.approval_status.as_str() {
+        "pending" => "review before approval",
+        "approved" => "ready to send from CLI",
+        "sent" => "already sent; audit only",
+        _ => "review state unknown",
+    }
+}
+
+fn draft_next_step_style(theme: &Theme, draft: &DraftReviewRow) -> Style {
+    match draft.approval_status.as_str() {
+        "pending" => theme.text_warning,
+        "approved" => theme.text_success,
+        "sent" => theme.text_muted,
+        _ => theme.text_dim,
+    }
+}
+
+fn provider_model_label(draft: &DraftReviewRow) -> String {
+    match (draft.provider.as_deref(), draft.model.as_deref()) {
+        (Some(provider), Some(model)) => format!("{provider}/{model}"),
+        (Some(provider), None) => provider.to_string(),
+        (None, Some(model)) => model.to_string(),
+        (None, None) => draft.source.clone(),
+    }
 }
 
 fn compact_timestamp(value: &str) -> String {
     value.replace('T', " ").chars().take(16).collect()
+}
+
+fn compact_optional_timestamp(value: Option<&str>) -> String {
+    value
+        .map(compact_timestamp)
+        .unwrap_or_else(|| "-".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
+
+    use super::*;
+
+    #[test]
+    fn draft_preview_shows_status_and_provider_metadata() {
+        let backend = TestBackend::new(120, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        let state = DraftsState {
+            drafts: vec![DraftReviewRow {
+                id: 42,
+                thread_id: Some(9),
+                status: "approved".to_string(),
+                source: "ai".to_string(),
+                provider: Some("openai-compatible".to_string()),
+                model: Some("gpt-4o-mini".to_string()),
+                has_rationale: true,
+                approval_status: "approved".to_string(),
+                created_at: "2026-04-06T10:15:00Z".to_string(),
+                updated_at: "2026-04-06T10:20:00Z".to_string(),
+                approved_at: Some("2026-04-06T10:22:00Z".to_string()),
+                sent_at: None,
+                latest_audit_at: Some("2026-04-06T10:22:00Z".to_string()),
+                latest_approval_audit_at: Some("2026-04-06T10:22:00Z".to_string()),
+                latest_send_audit_at: None,
+            }],
+            selected: 0,
+        };
+
+        terminal
+            .draw(|frame| render_drafts(frame, frame.area(), &theme, &state))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        assert_contains(&buffer, "approved");
+        assert_contains(&buffer, "openai-compatible");
+        assert_contains(&buffer, "gpt-4o-mini");
+        assert_contains(&buffer, "ready to send from CLI");
+        assert_contains(&buffer, "Nothing sends from the TUI. Review in CLI");
+        assert_contains(&buffer, "before approving or sending.");
+    }
+
+    fn assert_contains(buffer: &Buffer, needle: &str) {
+        let rendered = buffer
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            rendered.contains(needle),
+            "expected buffer to contain {needle:?}, got: {rendered:?}"
+        );
+    }
 }
