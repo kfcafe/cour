@@ -642,15 +642,16 @@ fn step_lines(state: &OnboardingState, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = match state.current_step {
         OnboardingStep::Welcome => vec![
             Line::from(vec![Span::styled(
-                "Welcome to cour. We'll start with the basics and keep advanced mail settings out of your way.",
+                "cour is a local-first mail client built for people who want a fast, keyboard-friendly inbox with their mail stored on their own machine.",
                 theme.text,
             )]),
             Line::from(""),
-            Line::from("Recommended setup asks for just a few things:"),
-            Line::from("• an account name you recognize"),
-            Line::from("• your email address"),
-            Line::from("• where cour should keep your local mail"),
+            Line::from("What cour does:"),
+            Line::from("• keeps your mail in a local Maildir on this computer"),
+            Line::from("• gives you a terminal-first inbox for reading, triage, and search"),
+            Line::from("• can add optional AI and advanced mail tools later"),
             Line::from(""),
+            Line::from("This setup will help you choose an account name, email address, and local mail location."),
             Line::from("Advanced options for mail download, AI, and custom sending settings are available later."),
             Line::from(""),
             Line::from(vec![Span::styled(
