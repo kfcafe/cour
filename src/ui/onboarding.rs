@@ -21,6 +21,7 @@ pub enum OnboardingStep {
     Welcome,
     AccountBasics,
     MaildirPath,
+    SetupMode,
     SyncCommand,
     AiProviders,
     SmtpIdentity,
@@ -33,38 +34,13 @@ impl OnboardingStep {
         match self {
             Self::Welcome => "Welcome",
             Self::AccountBasics => "Account basics",
-            Self::MaildirPath => "Maildir path",
-            Self::SyncCommand => "Sync command",
-            Self::AiProviders => "AI providers",
-            Self::SmtpIdentity => "SMTP identity",
+            Self::MaildirPath => "Mail storage",
+            Self::SetupMode => "Setup style",
+            Self::SyncCommand => "Mail download (advanced)",
+            Self::AiProviders => "AI features (advanced)",
+            Self::SmtpIdentity => "Sending mail (advanced)",
             Self::Review => "Review",
             Self::Complete => "Complete",
-        }
-    }
-
-    fn next(self) -> Option<Self> {
-        match self {
-            Self::Welcome => Some(Self::AccountBasics),
-            Self::AccountBasics => Some(Self::MaildirPath),
-            Self::MaildirPath => Some(Self::SyncCommand),
-            Self::SyncCommand => Some(Self::AiProviders),
-            Self::AiProviders => Some(Self::SmtpIdentity),
-            Self::SmtpIdentity => Some(Self::Review),
-            Self::Review => Some(Self::Complete),
-            Self::Complete => None,
-        }
-    }
-
-    fn previous(self) -> Option<Self> {
-        match self {
-            Self::Welcome => None,
-            Self::AccountBasics => Some(Self::Welcome),
-            Self::MaildirPath => Some(Self::AccountBasics),
-            Self::SyncCommand => Some(Self::MaildirPath),
-            Self::AiProviders => Some(Self::SyncCommand),
-            Self::SmtpIdentity => Some(Self::AiProviders),
-            Self::Review => Some(Self::SmtpIdentity),
-            Self::Complete => Some(Self::Review),
         }
     }
 }
@@ -150,15 +126,15 @@ pub struct FieldBuffers {
 impl Default for FieldBuffers {
     fn default() -> Self {
         Self {
-            account_name: "personal".to_string(),
+            account_name: String::new(),
             email_address: String::new(),
             maildir_root: String::new(),
             sync_command: String::new(),
-            ai_provider: "local".to_string(),
+            ai_provider: String::new(),
             ai_model: String::new(),
             ai_api_url: String::new(),
             ai_api_key_env: String::new(),
-            smtp_name: "default".to_string(),
+            smtp_name: String::new(),
             smtp_email_address: String::new(),
             smtp_host: String::new(),
             smtp_port: "465".to_string(),
@@ -178,6 +154,8 @@ pub struct OnboardingState {
     pub running: bool,
     pub config_path: PathBuf,
     pub status_message: Option<String>,
+    pub selected_field: usize,
+    pub advanced_setup: bool,
 }
 
 impl OnboardingState {
@@ -190,15 +168,65 @@ impl OnboardingState {
             running: true,
             config_path,
             status_message: None,
+            selected_field: starting_field_for(OnboardingStep::Welcome),
+            advanced_setup: false,
+        }
+    }
+
+    fn next_step(&self) -> Option<OnboardingStep> {
+        match self.current_step {
+            OnboardingStep::Welcome => Some(OnboardingStep::AccountBasics),
+            OnboardingStep::AccountBasics => Some(OnboardingStep::MaildirPath),
+            OnboardingStep::MaildirPath => Some(OnboardingStep::SetupMode),
+            OnboardingStep::SetupMode => Some(if self.advanced_setup {
+                OnboardingStep::SyncCommand
+            } else {
+                OnboardingStep::Review
+            }),
+            OnboardingStep::SyncCommand => Some(OnboardingStep::AiProviders),
+            OnboardingStep::AiProviders => Some(OnboardingStep::SmtpIdentity),
+            OnboardingStep::SmtpIdentity => Some(OnboardingStep::Review),
+            OnboardingStep::Review => Some(OnboardingStep::Complete),
+            OnboardingStep::Complete => None,
+        }
+    }
+
+    fn previous_step(&self) -> Option<OnboardingStep> {
+        match self.current_step {
+            OnboardingStep::Welcome => None,
+            OnboardingStep::AccountBasics => Some(OnboardingStep::Welcome),
+            OnboardingStep::MaildirPath => Some(OnboardingStep::AccountBasics),
+            OnboardingStep::SetupMode => Some(OnboardingStep::MaildirPath),
+            OnboardingStep::SyncCommand => Some(OnboardingStep::SetupMode),
+            OnboardingStep::AiProviders => Some(OnboardingStep::SyncCommand),
+            OnboardingStep::SmtpIdentity => Some(OnboardingStep::AiProviders),
+            OnboardingStep::Review => Some(if self.advanced_setup {
+                OnboardingStep::SmtpIdentity
+            } else {
+                OnboardingStep::SetupMode
+            }),
+            OnboardingStep::Complete => Some(OnboardingStep::Review),
         }
     }
 
     fn go_back(&mut self) {
         self.validation_errors.clear();
         self.status_message = None;
-        if let Some(previous) = self.current_step.previous() {
+        if let Some(previous) = self.previous_step() {
             self.current_step = previous;
+            self.selected_field = starting_field_for(previous);
         }
+    }
+
+    fn move_field(&mut self, direction: isize) {
+        let field_count = field_count_for(self.current_step);
+        if field_count <= 1 {
+            return;
+        }
+
+        let max_index = field_count.saturating_sub(1) as isize;
+        let next_index = (self.selected_field as isize + direction).clamp(0, max_index) as usize;
+        self.selected_field = next_index;
     }
 
     fn try_advance(&mut self) {
@@ -211,8 +239,11 @@ impl OnboardingState {
 
         self.capture_current_step();
 
-        match self.current_step.next() {
-            Some(next) => self.current_step = next,
+        match self.next_step() {
+            Some(next) => {
+                self.current_step = next;
+                self.selected_field = starting_field_for(next);
+            }
             None => self.running = false,
         }
     }
@@ -225,9 +256,10 @@ impl OnboardingState {
                 self.validation_errors.is_empty()
             }
             OnboardingStep::MaildirPath => {
-                self.validate_maildir_step();
+                self.ensure_maildir_step();
                 self.validation_errors.is_empty()
             }
+            OnboardingStep::SetupMode => true,
             OnboardingStep::SyncCommand => true,
             OnboardingStep::AiProviders => true,
             OnboardingStep::SmtpIdentity => true,
@@ -253,8 +285,8 @@ impl OnboardingState {
         }
     }
 
-    fn validate_maildir_step(&mut self) {
-        match validate_maildir_root(self.field_buffers.maildir_root.trim()) {
+    fn ensure_maildir_step(&mut self) {
+        match ensure_maildir_root(self.field_buffers.maildir_root.trim()) {
             Ok(()) => {}
             Err(error) => self.validation_errors.push(error),
         }
@@ -267,21 +299,39 @@ impl OnboardingState {
                 let account_name = self.field_buffers.account_name.trim().to_string();
                 let email = self.field_buffers.email_address.trim().to_string();
                 let account = self.ensure_account();
-                account.name = account_name;
+                account.name = account_name.clone();
                 account.email_address = email.clone();
                 account.default = true;
 
+                if self.field_buffers.maildir_root.trim().is_empty() {
+                    if let Some(maildir_root) = default_maildir_root(&account_name, &email) {
+                        self.field_buffers.maildir_root = maildir_root;
+                    }
+                }
+                if self.field_buffers.smtp_name.trim().is_empty() {
+                    self.field_buffers.smtp_name = account_name.clone();
+                }
                 if self.field_buffers.smtp_email_address.trim().is_empty() {
                     self.field_buffers.smtp_email_address = email.clone();
                 }
                 if self.field_buffers.smtp_username.trim().is_empty() {
-                    self.field_buffers.smtp_username = email;
+                    self.field_buffers.smtp_username = email.clone();
                 }
+                prefill_smtp_settings(&email, &mut self.field_buffers);
             }
             OnboardingStep::MaildirPath => {
                 let maildir_root = self.field_buffers.maildir_root.trim().to_string();
                 let account = self.ensure_account();
                 account.maildir_root = maildir_root;
+            }
+            OnboardingStep::SetupMode => {
+                self.advanced_setup = self.selected_field == 1;
+                if !self.advanced_setup {
+                    self.draft_config.ai = DraftAiConfig::default();
+                    self.draft_config.smtp.clear();
+                    let account = self.ensure_account();
+                    account.sync_command.clear();
+                }
             }
             OnboardingStep::SyncCommand => {
                 let sync_command = self.field_buffers.sync_command.trim().to_string();
@@ -309,8 +359,19 @@ impl OnboardingState {
                 let smtp_username = self.field_buffers.smtp_username.trim().to_string();
                 let smtp_password_env = self.field_buffers.smtp_password_env.trim().to_string();
                 let smtp_tls_mode = self.field_buffers.smtp_tls_mode.trim().to_string();
+
+                if smtp_host.is_empty() {
+                    self.draft_config.smtp.clear();
+                    return;
+                }
+
+                let fallback_name = self.field_buffers.account_name.trim().to_string();
                 let smtp = self.ensure_smtp();
-                smtp.name = smtp_name;
+                smtp.name = if smtp_name.is_empty() {
+                    fallback_name
+                } else {
+                    smtp_name
+                };
                 smtp.email_address = smtp_email_address;
                 smtp.host = smtp_host;
                 smtp.port = smtp_port;
@@ -400,28 +461,90 @@ fn handle_key(state: &mut OnboardingState, code: KeyCode) {
     match code {
         KeyCode::Char('q') => state.running = false,
         KeyCode::Esc => state.go_back(),
-        KeyCode::Enter => state.try_advance(),
-        KeyCode::Backspace => {
+        KeyCode::Tab | KeyCode::Down => state.move_field(1),
+        KeyCode::BackTab | KeyCode::Up => state.move_field(-1),
+        KeyCode::Enter => {
+            if enter_moves_to_next_field(state) {
+                state.move_field(1);
+            } else {
+                state.try_advance();
+            }
+        }
+        KeyCode::Backspace if supports_text_input(state.current_step) => {
             active_buffer_mut(state).pop();
         }
-        KeyCode::Char(character) => active_buffer_mut(state).push(character),
+        KeyCode::Char(character)
+            if !character.is_control() && supports_text_input(state.current_step) =>
+        {
+            active_buffer_mut(state).push(character)
+        }
         _ => {}
+    }
+}
+
+fn enter_moves_to_next_field(state: &OnboardingState) -> bool {
+    supports_text_input(state.current_step)
+        && field_count_for(state.current_step) > 1
+        && state.selected_field + 1 < field_count_for(state.current_step)
+}
+
+fn supports_text_input(step: OnboardingStep) -> bool {
+    matches!(
+        step,
+        OnboardingStep::AccountBasics
+            | OnboardingStep::MaildirPath
+            | OnboardingStep::SyncCommand
+            | OnboardingStep::AiProviders
+            | OnboardingStep::SmtpIdentity
+    )
+}
+
+fn field_count_for(step: OnboardingStep) -> usize {
+    match step {
+        OnboardingStep::Welcome => 0,
+        OnboardingStep::AccountBasics => 2,
+        OnboardingStep::MaildirPath => 1,
+        OnboardingStep::SetupMode => 2,
+        OnboardingStep::SyncCommand => 1,
+        OnboardingStep::AiProviders => 4,
+        OnboardingStep::SmtpIdentity => 7,
+        OnboardingStep::Review => 0,
+        OnboardingStep::Complete => 0,
+    }
+}
+
+fn starting_field_for(step: OnboardingStep) -> usize {
+    match step {
+        OnboardingStep::AccountBasics => 0,
+        OnboardingStep::SmtpIdentity => 2,
+        _ => 0,
     }
 }
 
 fn active_buffer_mut(state: &mut OnboardingState) -> &mut String {
     match state.current_step {
-        OnboardingStep::AccountBasics => {
-            if state.field_buffers.email_address.trim().is_empty() {
-                &mut state.field_buffers.email_address
-            } else {
-                &mut state.field_buffers.account_name
-            }
-        }
+        OnboardingStep::AccountBasics => match state.selected_field {
+            0 => &mut state.field_buffers.account_name,
+            _ => &mut state.field_buffers.email_address,
+        },
         OnboardingStep::MaildirPath => &mut state.field_buffers.maildir_root,
+        OnboardingStep::SetupMode => &mut state.field_buffers.account_name,
         OnboardingStep::SyncCommand => &mut state.field_buffers.sync_command,
-        OnboardingStep::AiProviders => &mut state.field_buffers.ai_model,
-        OnboardingStep::SmtpIdentity => &mut state.field_buffers.smtp_host,
+        OnboardingStep::AiProviders => match state.selected_field {
+            0 => &mut state.field_buffers.ai_provider,
+            1 => &mut state.field_buffers.ai_model,
+            2 => &mut state.field_buffers.ai_api_url,
+            _ => &mut state.field_buffers.ai_api_key_env,
+        },
+        OnboardingStep::SmtpIdentity => match state.selected_field {
+            0 => &mut state.field_buffers.smtp_name,
+            1 => &mut state.field_buffers.smtp_email_address,
+            2 => &mut state.field_buffers.smtp_host,
+            3 => &mut state.field_buffers.smtp_port,
+            4 => &mut state.field_buffers.smtp_username,
+            5 => &mut state.field_buffers.smtp_password_env,
+            _ => &mut state.field_buffers.smtp_tls_mode,
+        },
         OnboardingStep::Welcome | OnboardingStep::Review | OnboardingStep::Complete => {
             &mut state.field_buffers.account_name
         }
@@ -487,8 +610,8 @@ fn render_body(frame: &mut ratatui::Frame, area: Rect, theme: &Theme, state: &On
 fn render_footer(frame: &mut ratatui::Frame, area: Rect, theme: &Theme, state: &OnboardingState) {
     let footer_text = state
         .status_message
-        .as_deref()
-        .unwrap_or("Enter next when valid  Esc back  q quit");
+        .clone()
+        .unwrap_or_else(|| footer_help(state.current_step).to_string());
     let widget = Paragraph::new(footer_text).style(theme.keyhint_desc).block(
         Block::default()
             .borders(Borders::TOP)
@@ -497,56 +620,171 @@ fn render_footer(frame: &mut ratatui::Frame, area: Rect, theme: &Theme, state: &
     frame.render_widget(widget, area);
 }
 
+fn footer_help(step: OnboardingStep) -> &'static str {
+    match step {
+        OnboardingStep::Welcome => "Enter continue  q quit",
+        OnboardingStep::AccountBasics | OnboardingStep::AiProviders | OnboardingStep::SmtpIdentity => {
+            "Enter next field or continue  Tab/Down next field  Shift+Tab/Up previous  Esc back  q quit"
+        }
+        OnboardingStep::MaildirPath => {
+            "Type path  Enter continue — cour creates it if missing  Esc back  q quit"
+        }
+        OnboardingStep::SetupMode => {
+            "Tab/Down choose setup style  Enter continue  Esc back  q quit"
+        }
+        OnboardingStep::SyncCommand => "Type to edit  Enter continue  Esc back  q quit",
+        OnboardingStep::Review => "Enter write config  Esc back  q quit",
+        OnboardingStep::Complete => "Enter finish  Esc back  q quit",
+    }
+}
+
 fn step_lines(state: &OnboardingState, theme: &Theme) -> Vec<Line<'static>> {
     let mut lines = match state.current_step {
         OnboardingStep::Welcome => vec![
             Line::from(vec![Span::styled(
-                "Welcome to cour. This setup flow will draft a local config before anything is written.",
+                "Welcome to cour. We'll start with the basics and keep advanced mail settings out of your way.",
                 theme.text,
             )]),
             Line::from(""),
+            Line::from("Recommended setup asks for just a few things:"),
+            Line::from("• an account name you recognize"),
+            Line::from("• your email address"),
+            Line::from("• where cour should keep your local mail"),
+            Line::from(""),
+            Line::from("Advanced options for mail download, AI, and custom sending settings are available later."),
+            Line::from(""),
             Line::from(vec![Span::styled(
-                "Planned wizard scope:",
-                theme.section_header,
+                "Press Enter to continue.",
+                theme.text_accent,
             )]),
-            Line::from("• one or more email accounts"),
-            Line::from("• Maildir roots and optional sync commands"),
-            Line::from("• local or remote AI providers, explicit about secrets"),
-            Line::from("• SMTP identities for sending"),
         ],
         OnboardingStep::AccountBasics => vec![
-            kv_line("Account name", &state.field_buffers.account_name),
-            kv_line("Email address", &state.field_buffers.email_address),
+            field_line(
+                "Account name",
+                &state.field_buffers.account_name,
+                state.selected_field == 0,
+                theme,
+            ),
+            field_line(
+                "Email address",
+                &state.field_buffers.email_address,
+                state.selected_field == 1,
+                theme,
+            ),
             Line::from(""),
-            Line::from("Enter advances only when required fields are present."),
+            Line::from("Account name is just a label inside cour, like Personal or Work."),
+            Line::from("Press Enter to move to the next field, then Enter again to continue."),
         ],
         OnboardingStep::MaildirPath => vec![
-            kv_line("Maildir root", &state.field_buffers.maildir_root),
+            field_line(
+                "Maildir root",
+                &state.field_buffers.maildir_root,
+                true,
+                theme,
+            ),
             Line::from(""),
-            Line::from("Use an existing Maildir path on disk. No files are modified in this step."),
+            Line::from("Choose where cour should keep this account's local mail."),
+            Line::from("We prefilled a suggested location based on this account."),
+            Line::from("If this folder does not exist yet, cour will create it for you automatically."),
+            Line::from("That includes the required cur/, new/, and tmp/ Maildir folders."),
+        ],
+        OnboardingStep::SetupMode => vec![
+            choice_line(
+                "Simple setup (recommended)",
+                "Set up local mail storage now. Add advanced options later.",
+                state.selected_field == 0,
+                theme,
+            ),
+            choice_line(
+                "Advanced setup",
+                "Configure mail download, AI providers, and custom sending settings now.",
+                state.selected_field == 1,
+                theme,
+            ),
         ],
         OnboardingStep::SyncCommand => vec![
-            kv_line("Sync command", &state.field_buffers.sync_command),
+            field_line(
+                "Download command",
+                &state.field_buffers.sync_command,
+                true,
+                theme,
+            ),
             Line::from(""),
-            Line::from("Optional: mbsync personal, offlineimap, or another local sync command."),
+            Line::from("Optional advanced step."),
+            Line::from("Only fill this in if you already use a tool like mbsync or offlineimap."),
         ],
         OnboardingStep::AiProviders => vec![
-            kv_line("Provider", &state.field_buffers.ai_provider),
-            kv_line("Model", &state.field_buffers.ai_model),
-            kv_line("API URL", &state.field_buffers.ai_api_url),
-            kv_line("API key env", &state.field_buffers.ai_api_key_env),
+            field_line(
+                "Provider",
+                &state.field_buffers.ai_provider,
+                state.selected_field == 0,
+                theme,
+            ),
+            field_line(
+                "Model",
+                &state.field_buffers.ai_model,
+                state.selected_field == 1,
+                theme,
+            ),
+            field_line(
+                "API URL",
+                &state.field_buffers.ai_api_url,
+                state.selected_field == 2,
+                theme,
+            ),
+            field_line(
+                "API key env",
+                &state.field_buffers.ai_api_key_env,
+                state.selected_field == 3,
+                theme,
+            ),
             Line::from(""),
-            Line::from("Secrets stay explicit: reference env vars instead of storing raw keys in config."),
+            Line::from("Optional advanced step. Leave these blank if you do not want AI features yet."),
+            Line::from("Enter moves to the next field before continuing."),
         ],
-        OnboardingStep::SmtpIdentity => vec![
-            kv_line("SMTP name", &state.field_buffers.smtp_name),
-            kv_line("Email address", &state.field_buffers.smtp_email_address),
-            kv_line("Host", &state.field_buffers.smtp_host),
-            kv_line("Port", &state.field_buffers.smtp_port),
-            kv_line("Username", &state.field_buffers.smtp_username),
-            kv_line("Password env", &state.field_buffers.smtp_password_env),
-            kv_line("TLS mode", &state.field_buffers.smtp_tls_mode),
-        ],
+        OnboardingStep::SmtpIdentity => {
+            let mut lines = vec![
+                field_line("Sending name", &state.field_buffers.smtp_name, state.selected_field == 0, theme),
+                field_line(
+                    "Email address",
+                    &state.field_buffers.smtp_email_address,
+                    state.selected_field == 1,
+                    theme,
+                ),
+                field_line("SMTP host", &state.field_buffers.smtp_host, state.selected_field == 2, theme),
+                field_line("SMTP port", &state.field_buffers.smtp_port, state.selected_field == 3, theme),
+                field_line(
+                    "Username",
+                    &state.field_buffers.smtp_username,
+                    state.selected_field == 4,
+                    theme,
+                ),
+                field_line(
+                    "Password env",
+                    &state.field_buffers.smtp_password_env,
+                    state.selected_field == 5,
+                    theme,
+                ),
+                field_line(
+                    "TLS mode",
+                    &state.field_buffers.smtp_tls_mode,
+                    state.selected_field == 6,
+                    theme,
+                ),
+                Line::from(""),
+            ];
+            if let Some(provider) = detect_mail_provider(&state.field_buffers.email_address) {
+                lines.push(Line::from(format!(
+                    "cour detected {} settings and prefilled the SMTP host, port, and TLS mode.",
+                    provider.display_name
+                )));
+            }
+            lines.push(Line::from(
+                "Advanced sending setup. Leave blank if you want to configure sending later.",
+            ));
+            lines.push(Line::from("Enter moves to the next field before continuing."));
+            lines
+        },
         OnboardingStep::Review => review_lines(state),
         OnboardingStep::Complete => vec![
             Line::from("Setup complete."),
@@ -556,7 +794,7 @@ fn step_lines(state: &OnboardingState, theme: &Theme) -> Vec<Line<'static>> {
             Line::from("Next steps:"),
             Line::from("• run cour doctor"),
             Line::from("• run cour reindex"),
-            Line::from("• export the listed AI / SMTP env vars before using remote providers or send"),
+            Line::from("• rerun cour setup any time to add advanced sync, AI, or sending options"),
         ],
     };
 
@@ -581,48 +819,125 @@ fn review_lines(state: &OnboardingState) -> Vec<Line<'static>> {
     let account = state.draft_config.accounts.first();
     let smtp = state.draft_config.smtp.first();
     let ai = &state.draft_config.ai.drafting;
+    let sync_command = account
+        .map(|entry| entry.sync_command.as_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("not configured");
+    let smtp_summary = if let Some(smtp) = smtp {
+        format!(
+            "{}:{} user={} password_env={}",
+            empty_as_placeholder(&smtp.host),
+            empty_as_placeholder(&smtp.port),
+            empty_as_placeholder(&smtp.username),
+            empty_as_placeholder(&smtp.password_env),
+        )
+    } else {
+        "not configured".to_string()
+    };
 
-    vec![
+    let mut lines = vec![
         Line::from("Review config to be written:"),
         Line::from(""),
         Line::from(format!(
+            "Setup style: {}",
+            if state.advanced_setup {
+                "advanced"
+            } else {
+                "simple"
+            }
+        )),
+        Line::from(format!(
             "Account: {} <{}>",
-            account.map(|a| a.name.as_str()).unwrap_or("personal"),
+            account.map(|a| a.name.as_str()).unwrap_or(""),
             account.map(|a| a.email_address.as_str()).unwrap_or(""),
         )),
         Line::from(format!(
             "Maildir: {}",
             account.map(|a| a.maildir_root.as_str()).unwrap_or(""),
         )),
+        Line::from(format!("Mail download: {sync_command}")),
         Line::from(format!(
-            "Sync: {}",
-            account
-                .map(|a| a.sync_command.as_str())
-                .filter(|value| !value.is_empty())
-                .unwrap_or("(none)"),
-        )),
-        Line::from(format!(
-            "AI: provider={} model={} api_url={} key_env={}",
+            "AI features: provider={} model={} api_url={} key_env={}",
             empty_as_placeholder(&ai.provider),
             empty_as_placeholder(&ai.model),
             empty_as_placeholder(&ai.api_url),
             empty_as_placeholder(&ai.api_key_env),
         )),
-        Line::from(format!(
-            "SMTP: {} {}:{} user={} password_env={}",
-            smtp.map(|s| s.host.as_str()).unwrap_or(""),
-            smtp.map(|s| s.port.as_str()).unwrap_or(""),
-            smtp.map(|s| s.tls_mode.as_str()).unwrap_or(""),
-            smtp.map(|s| s.username.as_str()).unwrap_or(""),
-            smtp.map(|s| s.password_env.as_str()).unwrap_or(""),
-        )),
+        Line::from(format!("Sending: {smtp_summary}")),
         Line::from(""),
-        Line::from("Press Enter to write the config file and continue."),
-    ]
+    ];
+
+    if !state.advanced_setup {
+        lines.push(Line::from(
+            "You chose simple setup. You can add mail download, AI, or sending settings later with cour setup.",
+        ));
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(
+        "Press Enter to write the config file and continue.",
+    ));
+    lines
 }
 
-fn kv_line(label: &str, value: &str) -> Line<'static> {
-    Line::from(format!("{label}: {}", empty_as_placeholder(value)))
+fn field_line(label: &str, value: &str, active: bool, theme: &Theme) -> Line<'static> {
+    let prefix = if active { "› " } else { "  " };
+    let value_text = if active {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            "█".to_string()
+        } else {
+            format!("{trimmed}█")
+        }
+    } else {
+        empty_as_placeholder(value).to_string()
+    };
+
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            if active {
+                theme.text_accent
+            } else {
+                theme.text_dim
+            },
+        ),
+        Span::styled(
+            format!("{label:<14}"),
+            if active {
+                theme.text_accent
+            } else {
+                theme.text_muted
+            },
+        ),
+        Span::styled(" ", theme.text_dim),
+        Span::styled(value_text, theme.text),
+    ])
+}
+
+fn choice_line(title: &str, detail: &str, active: bool, theme: &Theme) -> Line<'static> {
+    let prefix = if active { "◉ " } else { "○ " };
+
+    Line::from(vec![
+        Span::styled(
+            prefix,
+            if active {
+                theme.text_accent
+            } else {
+                theme.text_dim
+            },
+        ),
+        Span::styled(
+            title.to_string(),
+            if active {
+                theme.text_accent
+            } else {
+                theme.text
+            },
+        ),
+        Span::styled(" — ", theme.text_dim),
+        Span::styled(detail.to_string(), theme.text_muted),
+    ])
 }
 
 fn empty_as_placeholder(value: &str) -> &str {
@@ -634,27 +949,139 @@ fn empty_as_placeholder(value: &str) -> &str {
     }
 }
 
-fn validate_maildir_root(maildir_root: &str) -> Result<(), String> {
+fn ensure_maildir_root(maildir_root: &str) -> Result<(), String> {
     let trimmed = maildir_root.trim();
     if trimmed.is_empty() {
         return Err("Maildir root is required.".to_string());
     }
 
     let root = Path::new(trimmed);
-    if !root.exists() {
-        return Err("Maildir root does not exist.".to_string());
+    if root.exists() && !root.is_dir() {
+        return Err("Maildir root must be a directory path.".to_string());
     }
+
+    std::fs::create_dir_all(root)
+        .map_err(|error| format!("Failed to create Maildir root: {error}"))?;
 
     for required_dir in ["cur", "new", "tmp"] {
         let path = root.join(required_dir);
-        if !path.is_dir() {
-            return Err(format!(
-                "Maildir root must contain {required_dir}/ as a directory."
-            ));
-        }
+        std::fs::create_dir_all(&path).map_err(|error| {
+            format!("Failed to create Maildir {required_dir}/ directory: {error}")
+        })?;
     }
 
     Ok(())
+}
+
+fn default_maildir_root(account_name: &str, email_address: &str) -> Option<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let label = if account_name.trim().is_empty() {
+        email_address
+            .split('@')
+            .next()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("mail")
+    } else {
+        account_name
+    };
+    let folder_name = slugify_maildir_label(label);
+    Some(home.join("Mail").join(folder_name).display().to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DetectedMailProvider {
+    display_name: &'static str,
+    smtp_host: &'static str,
+    smtp_port: &'static str,
+    tls_mode: &'static str,
+}
+
+fn detect_mail_provider(email_address: &str) -> Option<DetectedMailProvider> {
+    let domain = email_address.split('@').nth(1)?.trim().to_ascii_lowercase();
+
+    match domain.as_str() {
+        "gmail.com" | "googlemail.com" => Some(DetectedMailProvider {
+            display_name: "Gmail",
+            smtp_host: "smtp.gmail.com",
+            smtp_port: "465",
+            tls_mode: "tls",
+        }),
+        "outlook.com" | "hotmail.com" | "live.com" | "msn.com" | "office365.com" => {
+            Some(DetectedMailProvider {
+                display_name: "Outlook",
+                smtp_host: "smtp.office365.com",
+                smtp_port: "587",
+                tls_mode: "starttls",
+            })
+        }
+        "yahoo.com" | "yahoo.co.uk" | "ymail.com" => Some(DetectedMailProvider {
+            display_name: "Yahoo",
+            smtp_host: "smtp.mail.yahoo.com",
+            smtp_port: "465",
+            tls_mode: "tls",
+        }),
+        "icloud.com" | "me.com" | "mac.com" => Some(DetectedMailProvider {
+            display_name: "iCloud",
+            smtp_host: "smtp.mail.me.com",
+            smtp_port: "587",
+            tls_mode: "starttls",
+        }),
+        "fastmail.com" | "fastmail.fm" => Some(DetectedMailProvider {
+            display_name: "Fastmail",
+            smtp_host: "smtp.fastmail.com",
+            smtp_port: "465",
+            tls_mode: "tls",
+        }),
+        "purelymail.com" => Some(DetectedMailProvider {
+            display_name: "Purelymail",
+            smtp_host: "smtp.purelymail.com",
+            smtp_port: "465",
+            tls_mode: "tls",
+        }),
+        _ => None,
+    }
+}
+
+fn prefill_smtp_settings(email_address: &str, field_buffers: &mut FieldBuffers) {
+    let Some(provider) = detect_mail_provider(email_address) else {
+        return;
+    };
+
+    if field_buffers.smtp_host.trim().is_empty() {
+        field_buffers.smtp_host = provider.smtp_host.to_string();
+    }
+    if field_buffers.smtp_port.trim().is_empty() || field_buffers.smtp_port.trim() == "465" {
+        field_buffers.smtp_port = provider.smtp_port.to_string();
+    }
+    if field_buffers.smtp_tls_mode.trim().is_empty() || field_buffers.smtp_tls_mode.trim() == "tls"
+    {
+        field_buffers.smtp_tls_mode = provider.tls_mode.to_string();
+    }
+    if field_buffers.smtp_username.trim().is_empty() {
+        field_buffers.smtp_username = email_address.trim().to_string();
+    }
+}
+
+fn slugify_maildir_label(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_was_separator = false;
+
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() {
+            slug.push(character.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator {
+            slug.push('-');
+            last_was_separator = true;
+        }
+    }
+
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "mail".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn provider_block(name: &str, provider: &DraftProviderConfig) -> Option<String> {
@@ -754,6 +1181,8 @@ fn write_config_from_onboarding(config_path: &Path, draft: &DraftConfigModel) ->
 mod tests {
     use super::*;
     use crate::config::AppConfig;
+    use crate::test_support::TestEnvGuard;
+    use crossterm::event::KeyCode;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -772,13 +1201,16 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_maildir_root() {
-        let missing = temp_maildir_path("missing");
-        let error = validate_maildir_root(missing.to_string_lossy().as_ref()).unwrap_err();
-        assert!(
-            error.contains("does not exist"),
-            "unexpected error: {error}"
-        );
+    fn creates_missing_maildir_root_with_cur_new_tmp() {
+        let root = temp_maildir_path("missing");
+
+        let result = ensure_maildir_root(root.to_string_lossy().as_ref());
+
+        assert!(result.is_ok(), "unexpected creation error: {result:?}");
+        assert!(root.join("cur").is_dir());
+        assert!(root.join("new").is_dir());
+        assert!(root.join("tmp").is_dir());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -786,16 +1218,29 @@ mod tests {
         let root = temp_maildir_path("valid");
         make_maildir(&root);
 
-        let result = validate_maildir_root(root.to_string_lossy().as_ref());
+        let result = ensure_maildir_root(root.to_string_lossy().as_ref());
 
         assert!(result.is_ok(), "unexpected validation error: {result:?}");
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
+    fn rejects_maildir_root_when_path_is_a_file() {
+        let root = temp_maildir_path("file");
+        fs::write(&root, "not a directory").unwrap();
+
+        let error = ensure_maildir_root(root.to_string_lossy().as_ref()).unwrap_err();
+
+        assert!(
+            error.contains("directory path"),
+            "unexpected error: {error}"
+        );
+        fs::remove_file(root).unwrap();
+    }
+
+    #[test]
     fn persists_account_and_maildir_values_when_steps_advance() {
         let root = temp_maildir_path("progression");
-        make_maildir(&root);
 
         let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
         state.try_advance();
@@ -812,13 +1257,173 @@ mod tests {
 
         state.field_buffers.maildir_root = root.to_string_lossy().to_string();
         state.try_advance();
-        assert_eq!(state.current_step, OnboardingStep::SyncCommand);
+        assert_eq!(state.current_step, OnboardingStep::SetupMode);
         assert_eq!(
             state.draft_config.accounts.first().unwrap().maildir_root,
             root.to_string_lossy()
         );
+        assert!(root.join("cur").is_dir());
+        assert!(root.join("new").is_dir());
+        assert!(root.join("tmp").is_dir());
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_basics_starts_with_account_name_selected() {
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+
+        state.try_advance();
+
+        assert_eq!(state.current_step, OnboardingStep::AccountBasics);
+        assert_eq!(state.selected_field, 0);
+        assert_eq!(state.field_buffers.account_name, "");
+    }
+
+    #[test]
+    fn tab_navigation_changes_which_field_receives_input() {
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+        state.current_step = OnboardingStep::AccountBasics;
+        state.selected_field = 0;
+
+        handle_key(&mut state, KeyCode::Char('W'));
+        handle_key(&mut state, KeyCode::Char('o'));
+        handle_key(&mut state, KeyCode::Char('r'));
+        handle_key(&mut state, KeyCode::Char('k'));
+        assert_eq!(state.field_buffers.account_name, "Work");
+        assert_eq!(state.field_buffers.email_address, "");
+
+        handle_key(&mut state, KeyCode::Tab);
+        handle_key(&mut state, KeyCode::Char('m'));
+        handle_key(&mut state, KeyCode::Char('e'));
+        handle_key(&mut state, KeyCode::Char('@'));
+
+        assert_eq!(state.field_buffers.account_name, "Work");
+        assert_eq!(state.field_buffers.email_address, "me@");
+    }
+
+    #[test]
+    fn enter_moves_between_fields_before_advancing_step() {
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+        state.current_step = OnboardingStep::AccountBasics;
+        state.selected_field = 0;
+        state.field_buffers.account_name = "Work".to_string();
+        state.field_buffers.email_address = "me@example.com".to_string();
+
+        handle_key(&mut state, KeyCode::Enter);
+        assert_eq!(state.current_step, OnboardingStep::AccountBasics);
+        assert_eq!(state.selected_field, 1);
+
+        handle_key(&mut state, KeyCode::Enter);
+        assert_eq!(state.current_step, OnboardingStep::MaildirPath);
+    }
+
+    #[test]
+    fn welcome_step_ignores_text_input() {
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+
+        handle_key(&mut state, KeyCode::Char('x'));
+
+        assert_eq!(state.current_step, OnboardingStep::Welcome);
+        assert_eq!(state.field_buffers.account_name, "");
+    }
+
+    #[test]
+    fn simple_setup_skips_advanced_steps() {
+        let root = temp_maildir_path("simple");
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+
+        state.try_advance();
+        state.field_buffers.account_name = "Personal".to_string();
+        state.field_buffers.email_address = "me@example.com".to_string();
+        state.try_advance();
+        state.field_buffers.maildir_root = root.to_string_lossy().to_string();
+        state.try_advance();
+
+        assert_eq!(state.current_step, OnboardingStep::SetupMode);
+        assert_eq!(state.selected_field, 0);
+
+        state.try_advance();
+
+        assert_eq!(state.current_step, OnboardingStep::Review);
+        assert!(!state.advanced_setup);
+        assert!(state.draft_config.smtp.is_empty());
+        assert!(state.draft_config.accounts[0].sync_command.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn advanced_setup_includes_advanced_steps() {
+        let root = temp_maildir_path("advanced");
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+
+        state.try_advance();
+        state.field_buffers.account_name = "Personal".to_string();
+        state.field_buffers.email_address = "me@example.com".to_string();
+        state.try_advance();
+        state.field_buffers.maildir_root = root.to_string_lossy().to_string();
+        state.try_advance();
+        state.selected_field = 1;
+
+        state.try_advance();
+
+        assert_eq!(state.current_step, OnboardingStep::SyncCommand);
+        assert!(state.advanced_setup);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn account_basics_prefills_maildir_and_detected_smtp_settings() {
+        let home = temp_maildir_path("home");
+        fs::create_dir_all(&home).unwrap();
+        let mut env_guard = TestEnvGuard::acquire();
+        env_guard.set_var("HOME", &home);
+
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+        state.current_step = OnboardingStep::AccountBasics;
+        state.field_buffers.account_name = "Personal Inbox".to_string();
+        state.field_buffers.email_address = "me@gmail.com".to_string();
+
+        state.capture_current_step();
+
+        assert!(state
+            .field_buffers
+            .maildir_root
+            .contains("Mail/personal-inbox"));
+        assert_eq!(state.field_buffers.smtp_host, "smtp.gmail.com");
+        assert_eq!(state.field_buffers.smtp_port, "465");
+        assert_eq!(state.field_buffers.smtp_tls_mode, "tls");
+        assert_eq!(state.field_buffers.smtp_username, "me@gmail.com");
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn account_basics_detects_purelymail_defaults() {
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+        state.current_step = OnboardingStep::AccountBasics;
+        state.field_buffers.account_name = "Work".to_string();
+        state.field_buffers.email_address = "me@purelymail.com".to_string();
+
+        state.capture_current_step();
+
+        assert_eq!(state.field_buffers.smtp_host, "smtp.purelymail.com");
+        assert_eq!(state.field_buffers.smtp_port, "465");
+        assert_eq!(state.field_buffers.smtp_tls_mode, "tls");
+        assert_eq!(state.field_buffers.smtp_username, "me@purelymail.com");
+    }
+
+    #[test]
+    fn blank_smtp_host_keeps_sending_unconfigured() {
+        let mut state = OnboardingState::new(PathBuf::from("/tmp/cour.toml"));
+        state.current_step = OnboardingStep::SmtpIdentity;
+        state.field_buffers.smtp_name = "Personal".to_string();
+        state.field_buffers.smtp_email_address = "me@example.com".to_string();
+        state.field_buffers.smtp_host = String::new();
+
+        state.capture_current_step();
+
+        assert!(state.draft_config.smtp.is_empty());
     }
 
     #[test]
